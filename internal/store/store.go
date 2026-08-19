@@ -72,13 +72,24 @@ func (s *Store) EventExists(ctx context.Context, eventID string) (bool, error) {
 	return true, nil
 }
 
-// InsertEvent stores the raw delivery.
-func (s *Store) InsertEvent(ctx context.Context, e Event) error {
-	_, err := s.pool.Exec(ctx,
+// InsertEvent stores the raw delivery when event_id has not been seen before.
+// It returns inserted=false for duplicate deliveries.
+func (s *Store) InsertEvent(ctx context.Context, e Event) (inserted bool, err error) {
+	var eventID string
+	err = s.pool.QueryRow(ctx,
 		`INSERT INTO events (event_id, call_id, account_id, payload)
-		 VALUES ($1, $2, $3, $4)`,
-		e.EventID, e.CallID, e.AccountID, e.Payload)
-	return err
+		 VALUES ($1, $2, $3, $4)
+		 ON CONFLICT (event_id) DO NOTHING
+		 RETURNING event_id`,
+		e.EventID, e.CallID, e.AccountID, e.Payload,
+	).Scan(&eventID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // UpsertCall creates or refreshes the call record for this event.
