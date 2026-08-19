@@ -6,7 +6,9 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/convin/webhook-ingest/internal/store"
 	"github.com/convin/webhook-ingest/internal/testutil"
 )
 
@@ -80,5 +82,41 @@ func TestDuplicateDeliveryIsIgnored(t *testing.T) {
 	}
 	if n != 1 {
 		t.Fatalf("stored %d copies of %s, want 1", n, eventID)
+	}
+}
+
+func waitForRecordingProcessed(t *testing.T, st *store.Store, callID string, within time.Duration) bool {
+	t.Helper()
+	ctx := context.Background()
+	deadline := time.Now().Add(within)
+
+	for time.Now().Before(deadline) {
+		var processed bool
+		err := st.Pool().QueryRow(ctx,
+			`SELECT recording_processed FROM calls WHERE call_id = $1`, callID,
+		).Scan(&processed)
+		if err != nil {
+			t.Fatalf("query recording_processed for %s: %v", callID, err)
+		}
+		if processed {
+			return true
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	return false
+}
+
+func TestRecordingMarkedProcessedAfterIngest(t *testing.T) {
+	srv, st := testutil.NewServer(t)
+	eventID, callID, accountID := testutil.IDs(t, st)
+
+	body := eventJSON(eventID, callID, accountID)
+	if resp := post(t, srv.URL+"/webhooks/calls", body); resp.StatusCode != http.StatusOK {
+		t.Fatalf("got %d, want 200", resp.StatusCode)
+	}
+
+	// recordingWork is 50ms; allow headroom for scheduling and DB round-trips.
+	if !waitForRecordingProcessed(t, st, callID, 500*time.Millisecond) {
+		t.Fatalf("recording for call %s was never marked processed", callID)
 	}
 }
