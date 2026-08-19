@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -89,6 +90,78 @@ func TestDuplicateDeliveryIsIgnored(t *testing.T) {
 	}
 	if n != 1 {
 		t.Fatalf("stored %d copies of %s, want 1", n, eventID)
+	}
+}
+
+func TestConcurrentDuplicateDeliveryStoresOneEvent(t *testing.T) {
+	srv, st := testutil.NewServer(t)
+	eventID, callID, accountID := testutil.IDs(t, st)
+	ctx := context.Background()
+	body := eventJSON(eventID, callID, accountID)
+
+	const workers = 32
+	var wg sync.WaitGroup
+	wg.Add(workers)
+	for range workers {
+		go func() {
+			defer wg.Done()
+			resp, err := http.Post(srv.URL+"/webhooks/calls", "application/json", strings.NewReader(body))
+			if err != nil {
+				t.Errorf("post: %v", err)
+				return
+			}
+			defer func() { _ = resp.Body.Close() }()
+			if resp.StatusCode != http.StatusOK {
+				t.Errorf("got %d, want 200", resp.StatusCode)
+			}
+		}()
+	}
+	wg.Wait()
+
+	var n int
+	row := st.Pool().QueryRow(ctx, `SELECT count(*) FROM events WHERE event_id = $1`, eventID)
+	if err := row.Scan(&n); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("stored %d copies of %s, want 1", n, eventID)
+	}
+}
+
+func TestConcurrentDuplicateDeliveryIncrementsStatsOnce(t *testing.T) {
+	srv, st := testutil.NewServer(t)
+	eventID, callID, accountID := testutil.IDs(t, st)
+	ctx := context.Background()
+	body := eventJSON(eventID, callID, accountID)
+
+	const workers = 32
+	var wg sync.WaitGroup
+	wg.Add(workers)
+	for range workers {
+		go func() {
+			defer wg.Done()
+			resp, err := http.Post(srv.URL+"/webhooks/calls", "application/json", strings.NewReader(body))
+			if err != nil {
+				t.Errorf("post: %v", err)
+				return
+			}
+			defer func() { _ = resp.Body.Close() }()
+			if resp.StatusCode != http.StatusOK {
+				t.Errorf("got %d, want 200", resp.StatusCode)
+			}
+		}()
+	}
+	wg.Wait()
+
+	got, err := st.AccountStats(ctx, accountID)
+	if err != nil {
+		t.Fatalf("AccountStats: %v", err)
+	}
+	if got.CallCount != 1 {
+		t.Fatalf("call_count: got %d, want 1", got.CallCount)
+	}
+	if got.TotalDurationSec != 143 {
+		t.Fatalf("total_duration_sec: got %d, want 143", got.TotalDurationSec)
 	}
 }
 
